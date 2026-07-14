@@ -10,9 +10,13 @@ BASE_API_URL = "https://swapi-node.vercel.app"
 DSN = "postgresql://postgres:postgres@127.0.0.1:5433/swapi"
 
 async def fetch_json(client: httpx.AsyncClient, url: str) -> dict:
-    response = await client.get(url)
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = await client.get(url, timeout=10.0)
+        response.raise_for_status()
+        return response.json()
+    except Exception as e:
+        print(f"  ⚠️  Ошибка при запросе {url}: {e}")
+        return {}
 
 async def resolve_path(client: httpx.AsyncClient, path: str, key_to_extract: str) -> str:
     if not path:
@@ -21,8 +25,12 @@ async def resolve_path(client: httpx.AsyncClient, path: str, key_to_extract: str
     full_url = f"{BASE_API_URL}{path}"
     try:
         data = await fetch_json(client, full_url)
-        return str(data.get(key_to_extract, ""))
-    except Exception:
+        # ВАЖНО: данные находятся внутри ключа 'fields'
+        fields = data.get("fields", {})
+        value = fields.get(key_to_extract, "")
+        return str(value) if value else ""
+    except Exception as e:
+        print(f"  ⚠️  Ошибка при разрешении пути {path}: {e}")
         return ""
 
 async def resolve_paths(client: httpx.AsyncClient, paths: list, key_to_extract: str) -> str:
@@ -30,21 +38,33 @@ async def resolve_paths(client: httpx.AsyncClient, paths: list, key_to_extract: 
         return ""
     
     tasks = [resolve_path(client, path, key_to_extract) for path in paths]
-    results = await asyncio.gather(*tasks)
+    results = await asyncio.gather(*tasks, return_exceptions=True)
     
-    valid_results = [res for res in results if res]
+    valid_results = []
+    for res in results:
+        if isinstance(res, Exception):
+            continue
+        if res:
+            valid_results.append(res)
+    
     return ", ".join(valid_results)
 
-async def process_character(client: httpx.AsyncClient, char_data: dict) -> dict:
+async def process_character(client: httpx.AsyncClient, char_data: dict, index: int) -> dict:
     fields = char_data.get("fields", {})
     
     url = fields.get("url", "")
-    char_id = url.strip("/").split("/")[-1] if url else ""
+    char_id = url.strip("/").split("/")[-1] if url else str(index + 1)
 
-    homeworld_task = resolve_path(client, fields.get("homeworld"), "name")
-    films_task = resolve_paths(client, fields.get("films", []), "title")
-    starships_task = resolve_paths(client, fields.get("starships", []), "starship_class")
-    vehicles_task = resolve_paths(client, fields.get("vehicles", []), "name")
+    homeworld_path = fields.get("homeworld")
+    films_paths = fields.get("films", [])
+    starships_paths = fields.get("starships", [])
+    vehicles_paths = fields.get("vehicles", [])
+
+    # Асинхронно разрешаем пути
+    homeworld_task = resolve_path(client, homeworld_path, "name") if homeworld_path else asyncio.sleep(0, result="")
+    films_task = resolve_paths(client, films_paths, "title")
+    starships_task = resolve_paths(client, starships_paths, "starship_class")
+    vehicles_task = resolve_paths(client, vehicles_paths, "name")
 
     homeworld, films, starships, vehicles = await asyncio.gather(
         homeworld_task, films_task, starships_task, vehicles_task
@@ -72,6 +92,12 @@ INSERT INTO people (id, name, birth_year, eye_color, films, gender, hair_color,
 VALUES (%(id)s, %(name)s, %(birth_year)s, %(eye_color)s, %(films)s, %(gender)s, 
         %(hair_color)s, %(height)s, %(homeworld)s, %(mass)s, %(skin_color)s, 
         %(starships)s, %(vehicles)s)
+ON CONFLICT (id) DO UPDATE SET
+    name = EXCLUDED.name,
+    homeworld = EXCLUDED.homeworld,
+    films = EXCLUDED.films,
+    starships = EXCLUDED.starships,
+    vehicles = EXCLUDED.vehicles
 """
 
 DELETE_SQL = "DELETE FROM people"
@@ -88,11 +114,14 @@ async def main():
             url = f"{BASE_API_URL}/api/people?page={page}&limit=10"
             data = await fetch_json(client, url)
             
+            if not data:
+                break
+                
             results = data.get("results", [])
             if not results:
                 break
                 
-            tasks = [process_character(client, char) for char in results]
+            tasks = [process_character(client, char, (page-1)*10 + i) for i, char in enumerate(results)]
             processed_chars = await asyncio.gather(*tasks)
             all_characters.extend(processed_chars)
             
