@@ -1,6 +1,6 @@
 import asyncio
 import sys
-import psycopg
+import asyncpg
 
 if sys.platform == 'win32':
     asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
@@ -29,9 +29,10 @@ async def wait_for_db():
     print("Ожидание готовности базы данных...")
     for i in range(30):
         try:
-            with psycopg.connect(DSN) as conn:
-                print("✅ База данных готова!")
-                return
+            conn = await asyncpg.connect(DSN)
+            await conn.close()
+            print("✅ База данных готова!")
+            return
         except Exception:
             print(f"Попытка {i+1}/30...")
             await asyncio.sleep(2)
@@ -41,14 +42,12 @@ async def main():
     await wait_for_db()
     print("Подключение к базе данных и создание таблицы...")
     
-    def create_table():
-        with psycopg.connect(DSN) as conn:
-            with conn.cursor() as cur:
-                cur.execute(CREATE_TABLE_SQL)
-                conn.commit()
-    
-    await asyncio.to_thread(create_table)
-    print("✅ Таблица 'people' успешно создана!")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await conn.execute(CREATE_TABLE_SQL)
+        print("✅ Таблица 'people' успешно создана!")
+    finally:
+        await conn.close()
 
 if __name__ == "__main__":
     asyncio.run(main())
